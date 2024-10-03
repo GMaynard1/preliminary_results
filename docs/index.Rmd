@@ -10,7 +10,8 @@ output: html_document
 ## Exploratory data analysis for various projects:
   
  <a href="https://ssalois1.github.io/preliminary_results/pull_bin_bt_data.html" target="_blank"> BT Grid Test - last updated Oct 02 2024 </a> 
- <a href="https://ssalois1.github.io/preliminary_results/pull_bin_bt_data.html" target="_blank"> eMOLT BotGrid - last updated Oct 03 2024 </a> 
+ 
+ <a href="https://gmaynard1.github.io/preliminary_results/PullingAndBinningEMOLT.html" target="_blank"> eMOLT BotGrid - last updated Oct 03 2024 </a> 
  
  
  
