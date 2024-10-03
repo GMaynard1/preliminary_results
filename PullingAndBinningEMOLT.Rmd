@@ -1,0 +1,210 @@
+---
+title: "Pulling & Binning eMOLT Bottom Temps"
+author: "George Maynard"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+## Function to Download eMOLT data from ERDDAP
+
+```{r emolt_download_source, include=TRUE,message=FALSE,warning=FALSE}
+emolt_download=function(
+    end_date=lubridate::round_date(
+    lubridate::ymd_hms(
+      Sys.time()
+    ),
+    unit="day"
+  ),
+  days=7){
+  ## Download the last week's data from ERDDAP
+  ## Seven days before the specified end is the start date for the data
+  start_date=end_date-lubridate::days(days)
+  ## Use the dates from above to create a URL for grabbing the data
+  full_data=read.csv(
+    paste0(
+      "https://erddap.emolt.net/erddap/tabledap/eMOLT_RT.csvp?tow_id%2Csegment_type%2Ctime%2Clatitude%2Clongitude%2Cdepth%2Ctemperature%2Csensor_type&segment_type=%22Fishing%22&time%3E=",
+      lubridate::year(start_date),
+      "-",
+      lubridate::month(start_date),
+      "-",
+      lubridate::day(start_date),
+      "T00%3A00%3A00Z&time%3C=",
+      lubridate::year(end_date),
+      "-",
+      lubridate::month(end_date),
+      "-",
+      lubridate::day(end_date),
+      "T12%3A02%3A43Z"
+    )
+  )
+  ## Randomly select one point per tow to create a subsampled dataset
+  data=full_data[0,]
+  tows=unique(full_data$tow_id)
+  for(i in tows){
+    x=subset(
+      full_data,
+      full_data$tow_id == i
+    )
+    data=rbind(
+      data,
+      x[sample(
+        (1:nrow(x)),
+        1
+      ),]
+    )
+  }
+  return(data)
+}
+```
+
+## Download the Doppio spatial domain and reproject it
+
+The spatial domain for the Doppio model is in WGS 1984. In order 
+to use it to build a grid with cells measurable in km, reproject it to UTM 19S
+
+```{r doppioReproject, include=TRUE,message=FALSE,warning=FALSE}
+## Read in the doppio grid
+ncin = ncdf4::nc_open("doppio_grid.nc")
+## Extract latitudes and longitudes
+lat = ncdf4::ncvar_get(
+  ncin,
+  "lat_rho"
+)
+lon = ncdf4::ncvar_get(
+  ncin,
+  "lon_rho"
+)
+
+## Create a single column for each
+points=data.frame(
+  latitude=as.numeric(),
+  longitude=as.numeric()
+)
+for(i in 1:length(lat)){
+  x=data.frame(
+    latitude=lat[i],
+    longitude=lon[i]
+  )
+  points=rbind(points,x)
+  rm(x)
+}
+
+## Make it a spatial object
+sf.points=sf::st_as_sf(points, coords=c("longitude","latitude"))
+sf::st_crs(sf.points)=4326
+## Convert it to UTM 19S
+sf.points=sf::st_transform(sf.points,32719)
+```
+
+## Create a grid from the Doppio spatial extents (10000,10000 is 10 km squares)
+
+```{r gridCreate, include=TRUE,message=FALSE,warning=FALSE}
+sf.test=sf::st_make_grid(
+  sf.points,
+  cellsize=c(42500,42500),
+  what="polygons",
+  square=TRUE
+)
+```
+
+## Download the GEBCO bathymetry for plotting over and reproject it
+
+The data downloaded through the marmap package is also in WGS 1984. In order to
+use it with our new grid, reproject it into UTM 19S
+
+```{r gebcoReproject, include=TRUE,message=FALSE,warning=FALSE}
+bath=marmap::getNOAA.bathy(
+  lon1=min(-80.83),
+  lon2=max(-56.79),
+  lat1=min(35.11),
+  lat2=max(46.89),
+  resolution=1,
+)
+## Convert bathymetric object to a raster
+sp.bath=marmap::as.raster(bath)
+## Reproject raster to UTM 19S
+sp.bath=raster::projectRaster(sp.bath,crs=32719)
+## Turn the reprojected raster back into a bathymetric object for plotting
+sp.bath=marmap::as.bathy(sp.bath)
+## Create color ramp
+blues=c(
+  "lightsteelblue4",
+  "lightsteelblue3",
+  "lightsteelblue2",
+  "lightsteelblue1"
+)
+```
+
+## Download the eMOLT observations and convert them into a spatial object
+
+```{r eMOLT_download_reproject, include=TRUE,message=FALSE,warning=FALSE}
+obs=emolt_download(days=7)
+sf.obs=sf::st_as_sf(obs, coords=c("longitude..degrees_east.","latitude..degrees_north."))
+## Reproject the spatial object to UTM 19S
+sf::st_crs(sf.obs)=4326
+sf.obs=sf::st_transform(sf.obs,32719)
+sf.obs$cell=NA
+```
+
+## Check to see which grid cell an observation falls into
+
+```{r eMOLT_grid_assignment,include=TRUE,message=FALSE,warning=FALSE}
+for(i in 1:nrow(obs)){
+  sf.obs$cell[i]=sf::st_intersects(sf.obs[i,],sf.test)[[1]]
+}
+```
+
+## Total observations within a grid cell and assign a color for plotting
+```{r gridSummary,include=TRUE,message=FALSE,warning=FALSE}
+## Create a new dataframe for frequency of observations
+fobs=data.frame(
+  cell=unique(sf.obs$cell),
+  geometry=NA,
+  frequency=NA,
+  scalecol=NA
+)
+for(i in 1:nrow(fobs)){
+  x=subset(sf.obs,sf.obs$cell==fobs$cell[i])
+  fobs$geometry[i]=x$geometry[1]
+  fobs$frequency[i]=nrow(x)
+}
+
+nobsval=seq(1,max(fobs$frequency),1)
+nobscol=cmocean::cmocean("thermal")(length(nobsval))
+
+for(i in 1:nrow(fobs)){
+  fobs$scalecol[i]=nobscol[which(nobsval==fobs$frequency[i])]
+}
+```
+
+## Plot the output
+```{r botGridplotting, include=TRUE,warning=FALSE,message=FALSE}
+## Plotting the bathymetry with different colors for land and sea
+plot(
+  sp.bath,
+  step=100,
+  deepest.isobath=-1000,
+  shallowest.isobath=0,
+  col="darkgray",
+  image = TRUE, 
+  land = TRUE, 
+  lwd = 0.1,
+  bpal = list(
+    c(0, max(sp.bath,na.rm=TRUE), "gray"),
+    c(min(sp.bath,na.rm=TRUE),0,blues)
+  ),
+  xlab="",
+  ylab=""
+)
+for(i in 1:nrow(fobs)){
+  plot(sf.test[fobs$cell[i]],col=fobs$scalecol[i],add=TRUE,border='darkgray')
+}
+
+legend=round(seq(1,max(nobsval),length.out=10),0)
+legend(
+  'bottomright',
+  legend=legend,
+  fill=nobscol[legend],
+  title="Observations"
+)
+```
